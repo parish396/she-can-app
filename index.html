@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>She Can Foundation</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <!-- Tailwind CSS from CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons from CDN -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, collection, query, where, addDoc, serverTimestamp, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // === GLOBAL VARIABLES & CONFIGURATION ===
+        // These are provided by the canvas environment for a self-contained experience.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = {
+  apiKey: "AIzaSyDcNY9HiRbQqdo8URbYzbPmhzozzlj4gJs",
+  authDomain: "sample-firebase-ai-app-4a6b8.firebaseapp.com",
+  projectId: "sample-firebase-ai-app-4a6b8",
+  storageBucket: "sample-firebase-ai-app-4a6b8.firebasestorage.app",
+  messagingSenderId: "40274268817",
+  appId: "1:40274268817:web:2d26e3106002323f436530"
+};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : '';
+
+        // Initialize Firebase services
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        // === APP STATE VARIABLES ===
+        let user = null;
+        let userId = null;
+        let role = 'guest'; // guest, intern, admin, super_admin
+        let currentView = 'main-website';
+        let referralCodeFromUrl = null;
+        let notificationTimeout = null;
+
+        // === APP-WIDE UTILITY FUNCTIONS ===
+
+        // Function to switch between different views/pages
+        const setView = (viewName, params = {}) => {
+            currentView = viewName;
+            // Hide all pages first
+            document.querySelectorAll('main > section').forEach(section => {
+                section.classList.add('hidden');
+            });
+            // Show the requested page
+            const page = document.getElementById(viewName);
+            if (page) {
+                page.classList.remove('hidden');
+            }
+            // Update specific pages based on params
+            if (viewName === 'donation-page' && params.referralCode) {
+                referralCodeFromUrl = params.referralCode;
+                updateDonationPage(params.referralCode);
+            }
+        };
+
+        // Function to show a temporary message/notification
+        const showMessage = (msg, duration = 3000) => {
+            const messageBox = document.getElementById('message-box');
+            messageBox.textContent = msg;
+            messageBox.classList.remove('hidden');
+            messageBox.classList.add('animate-fade-in');
+            if (notificationTimeout) clearTimeout(notificationTimeout);
+            notificationTimeout = setTimeout(() => {
+                messageBox.classList.add('hidden');
+            }, duration);
+        };
+
+        // Utility to format a Firestore Timestamp to a readable date string
+        const formatDate = (timestamp) => {
+            if (!timestamp) return 'N/A';
+            const date = timestamp.toDate();
+            return date.toLocaleDateString();
+        };
+
+        // Utility to format a number as a currency string
+        const formatCurrency = (amount) => {
+            if (typeof amount !== 'number') return '₹0';
+            return `₹${amount.toLocaleString()}`;
+        };
+
+        // Function to toggle loading state
+        const toggleLoading = (isLoading) => {
+            const loader = document.getElementById('loader');
+            if (isLoading) {
+                loader.classList.remove('hidden');
+            } else {
+                loader.classList.add('hidden');
+            }
+        };
+
+        // === AUTHENTICATION LOGIC ===
+
+        const handleAuth = async () => {
+            await signInAnonymously(auth);
+        };
+
+        // Listen for auth state changes
+        onAuthStateChanged(auth, async (currentUser) => {
+            if (currentUser) {
+                user = currentUser;
+                userId = currentUser.uid;
+                try {
+                    const userDocRef = doc(db, `artifacts/${appId}/users`, currentUser.uid);
+                    const userDoc = await getDoc(userDocRef);
+                    if (userDoc.exists()) {
+                        role = userDoc.data().role;
+                    } else {
+                        role = 'intern';
+                        await setDoc(userDocRef, { role: 'intern' }, { merge: true });
+                    }
+                } catch (e) {
+                    console.error("Error fetching user role:", e);
+                    role = 'intern';
+                }
+            } else {
+                user = null;
+                userId = null;
+                role = 'guest';
+            }
+            toggleLoading(false);
+            setupRealtimeListeners();
+            updateNavigation();
+            setView('main-website');
+        });
+
+        // Handle Signup form submission
+        document.getElementById('signup-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const name = document.getElementById('signup-name').value;
+            const email = document.getElementById('signup-email').value;
+            
+            toggleLoading(true);
+            try {
+                const uniqueId = crypto.randomUUID();
+                const userDocRef = doc(db, `artifacts/${appId}/users`, uniqueId);
+                const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+                const userData = {
+                    name: name || 'Anonymous Donor',
+                    email,
+                    role: 'intern',
+                    referralCode,
+                    totalRaised: 0,
+                    totalDonors: 0,
+                    milestones: { '500': false, '1000': false, '2000': false, '5000': false },
+                    badges: [],
+                    createdAt: serverTimestamp(),
+                    lastLogin: serverTimestamp(),
+                };
+
+                await setDoc(userDocRef, userData);
+                showMessage(`Signup successful! Your referral code is: ${referralCode}`);
+                setTimeout(() => setView('intern-dashboard'), 2000);
+            } catch (error) {
+                console.error("Signup failed:", error);
+                showMessage("Signup failed. Please try again.");
+            } finally {
+                toggleLoading(false);
+            }
+        });
+
+        // Handle Donation form submission
+        document.getElementById('donation-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const donorName = document.getElementById('donor-name').value;
+            const amount = parseInt(document.getElementById('donation-amount').value, 10);
+            
+            toggleLoading(true);
+
+            if (!referralCodeFromUrl) {
+                showMessage("Donation link is missing a referral code.");
+                toggleLoading(false);
+                return;
+            }
+
+            try {
+                const usersRef = collection(db, `artifacts/${appId}/users`);
+                const q = query(usersRef, where('referralCode', '==', referralCodeFromUrl));
+                const querySnapshot = await getDocs(q);
+
+                if (querySnapshot.empty) {
+                    showMessage("Invalid referral code.");
+                    toggleLoading(false);
+                    return;
+                }
+                const referredByUid = querySnapshot.docs[0].id;
+                
+                const donationDocRef = doc(collection(db, `artifacts/${appId}/public/data/donations`));
+                const internDocRef = doc(db, `artifacts/${appId}/users`, referredByUid);
+                
+                await runTransaction(db, async (transaction) => {
+                    const internDoc = await transaction.get(internDocRef);
+                    if (!internDoc.exists()) {
+                        throw new Error("Intern does not exist!");
+                    }
+
+                    const newTotalRaised = (internDoc.data().totalRaised || 0) + amount;
+                    const newTotalDonors = (internDoc.data().totalDonors || 0) + 1;
+
+                    transaction.set(donationDocRef, {
+                        donorName: donorName || 'Anonymous',
+                        amount,
+                        date: serverTimestamp(),
+                        internUid: referredByUid,
+                        appId,
+                    });
+
+                    transaction.update(internDocRef, {
+                        totalRaised: newTotalRaised,
+                        totalDonors: newTotalDonors,
+                    });
+                });
+
+                document.getElementById('donation-form-container').classList.add('hidden');
+                document.getElementById('donation-thank-you').classList.remove('hidden');
+                showMessage('Donation successful! Thank you!', 5000);
+
+            } catch (error) {
+                console.error("Donation failed:", error);
+                showMessage('Donation failed. Please try again.');
+            } finally {
+                toggleLoading(false);
+            }
+        });
+
+        // Function to update the intern dashboard
+        const updateInternDashboard = (internData, transactions) => {
+            if (!internData) return;
+
+            document.getElementById('intern-name-greeting').textContent = internData.name;
+            document.getElementById('total-raised').textContent = formatCurrency(internData.totalRaised);
+            document.getElementById('total-donors').textContent = internData.totalDonors;
+            document.getElementById('referral-code').textContent = internData.referralCode;
+
+            const milestones = [500, 1000, 2000, 5000, 10000];
+            const nextMilestone = milestones.find(m => m > (internData.totalRaised || 0)) || milestones[milestones.length - 1];
+            const progress = ((internData.totalRaised || 0) / nextMilestone) * 100;
+            document.getElementById('progress-bar').style.width = `${progress > 100 ? 100 : progress}%`;
+            document.getElementById('progress-text').textContent = `You've raised ${formatCurrency(internData.totalRaised)} of your ${formatCurrency(nextMilestone)} goal!`;
+
+            const badgesContainer = document.getElementById('badges-container');
+            badgesContainer.innerHTML = '';
+            milestones.forEach(m => {
+                const unlocked = (internData.totalRaised || 0) >= m;
+                badgesContainer.innerHTML += `
+                    <div class="p-4 rounded-xl shadow-md flex flex-col items-center gap-2 w-24 text-center transform transition-all duration-300 ${unlocked ? 'bg-gradient-to-br from-shecan-pink to-shecan-purple text-white hover:scale-110' : 'bg-shecan-gray text-gray-500'}">
+                        ${lucide.createIcons()['trophy'].toSvg({ width: 32, height: 32 })}
+                        <span class="text-xs font-bold">₹${m}</span>
+                        <span class="text-[10px]">${unlocked ? 'Unlocked!' : 'Locked'}</span>
+                    </div>
+                `;
+            });
+            
+            const transactionsList = document.getElementById('transactions-table-body');
+            transactionsList.innerHTML = '';
+            if (transactions.length > 0) {
+                transactions.forEach((t, index) => {
+                    transactionsList.innerHTML += `
+                        <tr class="border-b border-shecan-light-pink ${index % 2 === 0 ? 'bg-white' : 'bg-shecan-gray'}">
+                            <td class="p-3">${t.donorName || 'Anonymous'}</td>
+                            <td class="p-3 text-shecan-purple font-bold">${formatCurrency(t.amount)}</td>
+                            <td class="p-3 text-sm text-gray-500">${formatDate(t.date)}</td>
+                        </tr>
+                    `;
+                });
+            } else {
+                transactionsList.innerHTML = `
+                    <tr>
+                        <td colspan="3" class="p-3 text-center text-gray-500">No transactions found.</td>
+                    </tr>
+                `;
+            }
+        };
+
+        const updateLeaderboard = (leaderboardData) => {
+            const leaderboardList = document.getElementById('leaderboard-list');
+            if (leaderboardList) {
+                leaderboardList.innerHTML = '';
+                leaderboardData.forEach((intern, index) => {
+                    leaderboardList.innerHTML += `
+                        <li class="flex justify-between items-center font-medium">
+                            <span class="text-shecan-text">
+                                <span class="font-bold mr-2">${index + 1}.</span>
+                                ${intern.name}
+                            </span>
+                            <span class="text-shecan-purple font-bold">${formatCurrency(intern.totalRaised)}</span>
+                        </li>
+                    `;
+                });
+            }
+        };
+        
+        // Listeners for Intern dashboard
+        const setupInternListeners = () => {
+            if (!userId) return;
+            const internDocRef = doc(db, `artifacts/${appId}/users`, userId);
+            onSnapshot(internDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    updateInternDashboard(docSnap.data(), []);
+                }
+            });
+
+            const donationsRef = collection(db, `artifacts/${appId}/public/data/donations`);
+            const q = query(donationsRef, where('internUid', '==', userId));
+            onSnapshot(q, (snapshot) => {
+                const transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                const internData = document.getElementById('intern-name-greeting') ? {
+                    name: document.getElementById('intern-name-greeting').textContent,
+                    totalRaised: parseInt(document.getElementById('total-raised').textContent.replace(/[₹,]/g, '')),
+                    totalDonors: parseInt(document.getElementById('total-donors').textContent),
+                    referralCode: document.getElementById('referral-code').textContent,
+                } : null;
+                if (internData) {
+                    updateInternDashboard(internData, transactions);
+                }
+            });
+        };
+
+        const setupLeaderboardListener = () => {
+             const usersRef = collection(db, `artifacts/${appId}/users`);
+             onSnapshot(usersRef, (snapshot) => {
+                 const interns = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                 const sortedInterns = interns.sort((a, b) => b.totalRaised - a.totalRaised);
+                 updateLeaderboard(sortedInterns);
+             });
+        };
+
+        // Main function to set up all real-time listeners after auth
+        const setupRealtimeListeners = () => {
+            setupInternListeners();
+            setupLeaderboardListener();
+        };
+
+        // Function to update the Public Donation page with the intern's name
+        const updateDonationPage = async (referralCode) => {
+             if (!referralCode) return;
+            const internNameEl = document.getElementById('donation-intern-name');
+            const usersRef = collection(db, `artifacts/${appId}/users`);
+            const q = query(usersRef, where('referralCode', '==', referralCode));
+            const querySnapshot = await getDocs(q);
+
+            if (!querySnapshot.empty) {
+                const intern = querySnapshot.docs[0];
+                internNameEl.textContent = intern.data().name;
+            } else {
+                internNameEl.textContent = 'an intern';
+            }
+        };
+
+        const updateNavigation = () => {
+            const navItems = {
+                guest: [
+                    { name: 'Home', view: 'main-website' },
+                    { name: 'Login', view: 'login' },
+                    { name: 'Signup', view: 'signup' },
+                ],
+                intern: [
+                    { name: 'Dashboard', view: 'intern-dashboard' },
+                    { name: 'Leaderboard', view: 'intern-dashboard' },
+                    { name: 'Logout', action: () => signOut(auth) },
+                ],
+                admin: [
+                    { name: 'Admin Dashboard', view: 'admin-dashboard' },
+                    { name: 'Leaderboard', view: 'intern-dashboard' },
+                    { name: 'Logout', action: () => signOut(auth) },
+                ],
+                super_admin: [
+                    { name: 'Super Admin', view: 'super-admin-dashboard' },
+                    { name: 'Leaderboard', view: 'intern-dashboard' },
+                    { name: 'Logout', action: () => signOut(auth) },
+                ]
+            };
+            const navContainer = document.getElementById('nav-menu');
+            if (navContainer) {
+                navContainer.innerHTML = '';
+                navItems[role].forEach(item => {
+                    const button = document.createElement('button');
+                    button.className = 'text-shecan-dark-purple hover:text-shecan-pink transition-colors duration-300 font-medium flex items-center gap-2';
+                    button.textContent = item.name;
+                    button.addEventListener('click', item.action || (() => setView(item.view)));
+                    navContainer.appendChild(button);
+                });
+            }
+        };
+        
+        // Function to handle the initial setup on page load
+        window.onload = () => {
+            handleAuth();
+
+            // Set up event listeners for navigation and interactive elements
+            document.getElementById('nav-title').addEventListener('click', () => setView('main-website'));
+            document.getElementById('home-become-intern-btn').addEventListener('click', () => setView('signup'));
+            document.getElementById('home-donate-btn').addEventListener('click', () => setView('donation-page'));
+            document.getElementById('login-link').addEventListener('click', () => setView('login'));
+            document.getElementById('signup-link').addEventListener('click', () => setView('signup'));
+            document.getElementById('donation-back-home').addEventListener('click', () => setView('main-website'));
+            document.getElementById('intern-link-copy').addEventListener('click', () => {
+                const referralLink = `${window.location.origin}?ref=${document.getElementById('referral-code').textContent}`;
+                navigator.clipboard.writeText(referralLink);
+                showMessage('Donation link copied!');
+            });
+             document.getElementById('intern-link-share').addEventListener('click', () => {
+                 const referralLink = `${window.location.origin}?ref=${document.getElementById('referral-code').textContent}`;
+                 const text = encodeURIComponent(`I'm an intern for 'she can' foundation! Help me reach my goal by donating here: ${referralLink}`);
+                 window.open(`https://wa.me/?text=${text}`, '_blank');
+             });
+
+            // Check for referral code in URL on initial load
+            const urlParams = new URLSearchParams(window.location.search);
+            const code = urlParams.get('ref');
+            if (code) {
+                setView('donation-page', { referralCode: code });
+            }
+        };
+    </script>
+    <style>
+        /* Custom Tailwind Configuration */
+        html {
+            scroll-behavior: smooth;
+        }
+        body {
+            font-family: 'Poppins', sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+        .animate-spin {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-pulse-slow {
+            animation: pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .5; }
+        }
+        
+        /* Custom color palette for the app */
+        .bg-shecan-bg { background-color: #FFF5EE; }
+        .text-shecan-text { color: #333333; }
+        .bg-shecan-light-pink { background-color: #F8BBD0; }
+        .bg-shecan-pink { background-color: #F48FB1; }
+        .bg-shecan-purple { background-color: #8E44AD; }
+        .bg-shecan-dark-purple { background-color: #5D3B87; }
+        .text-shecan-dark-purple { color: #5D3B87; }
+        .text-shecan-purple { color: #8E44AD; }
+        .text-shecan-pink { color: #F48FB1; }
+        .border-shecan-light-pink { border-color: #F8BBD0; }
+        .hover\:bg-shecan-dark-purple:hover { background-color: #5D3B87; }
+        .hover\:text-shecan-pink:hover { color: #F48FB1; }
+        .focus\:ring-shecan-pink:focus { --tw-ring-color: #F48FB1; }
+        
+        .lucide {
+            width: 1em;
+            height: 1em;
+            stroke-width: 2;
+        }
+        
+        /* General layout and component styling */
+        .rounded-3xl { border-radius: 1.5rem; }
+        .shadow-xl { box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1); }
+        .shadow-lg { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
+    </style>
+</head>
+<body class="min-h-screen bg-shecan-bg font-sans text-shecan-text flex flex-col">
+    <!-- Notification/Message Box -->
+    <div id="message-box" class="hidden fixed top-4 left-1/2 -translate-x-1/2 p-3 rounded-lg shadow-md bg-shecan-purple text-white z-50"></div>
+    
+    <!-- Loading Spinner -->
+    <div id="loader" class="hidden fixed inset-0 flex justify-center items-center bg-shecan-bg z-[100]">
+        <div class="w-16 h-16 border-4 border-shecan-pink border-dashed rounded-full animate-spin"></div>
+    </div>
+    
+    <!-- Main Header -->
+    <header class="p-4 bg-white shadow-md flex justify-between items-center z-10 sticky top-0">
+        <h1 id="nav-title" class="text-3xl font-bold text-shecan-purple cursor-pointer">she can</h1>
+        <nav id="nav-menu" class="hidden md:flex space-x-4">
+            <!-- Navigation buttons will be injected here by JavaScript -->
+        </nav>
+        <div class="md:hidden">
+            <!-- Mobile menu toggle would go here -->
+        </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="flex-grow flex flex-col p-4 md:p-8">
+
+        <!-- 1. Main Website Section -->
+        <section id="main-website" class="flex-grow flex flex-col gap-12">
+            <div class="flex flex-col md:flex-row items-center justify-between p-8 bg-shecan-light-pink rounded-3xl shadow-xl animate-fade-in">
+                <div class="md:w-1/2">
+                    <h2 class="text-4xl md:text-5xl font-extrabold text-shecan-dark-purple leading-tight mb-4">Empowering women, one step at a time.</h2>
+                    <p class="text-lg text-shecan-text mb-6">Join our mission to create a brighter future for women and girls everywhere. Your support can change lives.</p>
+                    <div class="flex gap-4">
+                        <button id="home-become-intern-btn" class="px-6 py-3 bg-shecan-purple text-white font-bold rounded-full shadow-lg hover:bg-shecan-dark-purple transition-all duration-300 transform hover:scale-105">Become an Intern</button>
+                        <button id="home-donate-btn" class="px-6 py-3 bg-white text-shecan-purple font-bold rounded-full shadow-lg border-2 border-shecan-purple hover:bg-shecan-pink hover:text-white transition-all duration-300 transform hover:scale-105">Donate Now</button>
+                    </div>
+                </div>
+                <div class="mt-8 md:mt-0 md:w-1/2 flex justify-center">
+                    <div class="w-64 h-64 bg-shecan-purple rounded-full flex items-center justify-center animate-pulse-slow">
+                        <h3 class="text-white text-4xl font-bold text-center leading-snug">she can<br/>do it</h3>
+                    </div>
+                </div>
+            </div>
+            <!-- Other placeholder sections for About, Mission, etc. -->
+            <div class="p-8 bg-white rounded-3xl shadow-xl">
+                <h3 class="text-2xl font-bold text-shecan-purple mb-4">Our Mission</h3>
+                <p class="text-shecan-text">To provide resources and opportunities that enable women and girls to achieve their full potential. We focus on education, health, and economic empowerment.</p>
+            </div>
+        </section>
+
+        <!-- 2. Login/Signup Section -->
+        <section id="login" class="hidden flex-grow flex items-center justify-center p-4">
+            <div class="w-full max-w-md bg-white p-8 rounded-3xl shadow-xl animate-fade-in">
+                <h2 class="text-3xl font-bold text-center text-shecan-dark-purple mb-6">Login</h2>
+                <form id="login-form">
+                    <div class="mb-4"><label class="block text-shecan-text font-medium mb-1">Email</label><input type="email" id="login-email" class="w-full p-3 rounded-xl border border-shecan-light-pink focus:ring-2 focus:ring-shecan-pink" placeholder="email@example.com"></div>
+                    <div class="mb-6"><label class="block text-shecan-text font-medium mb-1">Password</label><input type="password" id="login-password" class="w-full p-3 rounded-xl border border-shecan-light-pink focus:ring-2 focus:ring-shecan-pink" placeholder="Password"></div>
+                    <button type="submit" class="w-full p-3 bg-shecan-purple text-white font-bold rounded-xl shadow-lg hover:bg-shecan-dark-purple transition-all duration-300 transform hover:scale-105">Log In</button>
+                    <p class="mt-4 text-center text-sm text-shecan-text">Don't have an account? <button id="signup-link" type="button" class="text-shecan-pink font-bold hover:underline">Sign up</button></p>
+                </form>
+            </div>
+        </section>
+
+        <section id="signup" class="hidden flex-grow flex items-center justify-center p-4">
+            <div class="w-full max-w-md bg-white p-8 rounded-3xl shadow-xl animate-fade-in">
+                <h2 class="text-3xl font-bold text-center text-shecan-dark-purple mb-6">Become a She Can Intern</h2>
+                <form id="signup-form">
+                    <div class="mb-4"><label class="block text-shecan-text font-medium mb-1">Your Name</label><input type="text" id="signup-name" class="w-full p-3 rounded-xl border border-shecan-light-pink focus:ring-2 focus:ring-shecan-pink" placeholder="Your Name" required></div>
+                    <div class="mb-4"><label class="block text-shecan-text font-medium mb-1">Email</label><input type="email" id="signup-email" class="w-full p-3 rounded-xl border border-shecan-light-pink focus:ring-2 focus:ring-shecan-pink" placeholder="email@example.com" required></div>
+                    <div class="mb-6"><label class="block text-shecan-text font-medium mb-1">Password</label><input type="password" id="signup-password" class="w-full p-3 rounded-xl border border-shecan-light-pink focus:ring-2 focus:ring-shecan-pink" placeholder="Password" required></div>
+                    <button type="submit" class="w-full p-3 bg-shecan-purple text-white font-bold rounded-xl shadow-lg hover:bg-shecan-dark-purple transition-all duration-300 transform hover:scale-105">Sign Up</button>
+                    <p class="mt-4 text-center text-sm text-shecan-text">Already have an account? <button id="login-link" type="button" class="text-shecan-pink font-bold hover:underline">Log in</button></p>
+                </form>
+            </div>
+        </section>
+
+        <!-- 3. Intern Dashboard Section -->
+        <section id="intern-dashboard" class="hidden p-4 md:p-8 flex flex-col md:flex-row gap-8 animate-fade-in">
+            <div class="md:w-2/3 flex flex-col gap-8">
+                <div class="bg-white p-6 rounded-3xl shadow-xl">
+                    <h2 class="text-3xl font-bold text-shecan-dark-purple mb-2">Hello, <span id="intern-name-greeting">Intern</span>!</h2>
+                    <p class="text-shecan-text text-lg">Welcome to your fundraising dashboard.</p>
+                </div>
+                <div class="grid md:grid-cols-2 gap-6">
+                    <div class="bg-white p-6 rounded-3xl shadow-xl flex items-center gap-4 animate-fade-in">
+                        <div class="p-4 bg-shecan-light-pink rounded-full text-shecan-purple">
+                            <svg class="lucide" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7H3v10h9"/><path d="M16 16v.01"/><path d="M12 16v.01"/><path d="M8 16v.01"/><path d="M21 16h-3.5a2.5 2.5 0 0 1 0-5H21c-1.5 0-3 .5-3 3s1.5 3 3 3z"/></svg>
+                        </div>
+                        <div><p class="text-sm text-shecan-text">Total Amount Raised</p><h4 id="total-raised" class="text-2xl font-bold text-shecan-dark-purple">₹0</h4></div>
+                    </div>
+                    <div class="bg-white p-6 rounded-3xl shadow-xl flex items-center gap-4 animate-fade-in">
+                        <div class="p-4 bg-shecan-light-pink rounded-full text-shecan-purple">
+                            <svg class="lucide" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                        </div>
+                        <div><p class="text-sm text-shecan-text">Total Donors</p><h4 id="total-donors" class="text-2xl font-bold text-shecan-dark-purple">0</h4></div>
+                    </div>
+                </div>
+                <div class="bg-white p-6 rounded-3xl shadow-xl">
+                    <h3 class="text-xl font-bold text-shecan-purple mb-4">Milestone Progress</h3>
+                    <p id="progress-text" class="text-shecan-text mb-2">You've raised ₹0 of your ₹500 goal!</p>
+                    <div class="w-full bg-shecan-gray rounded-full h-4">
+                        <div id="progress-bar" class="bg-shecan-pink h-4 rounded-full transition-all duration-500 ease-in-out" style="width: 0%;"></div>
+                    </div>
+                    <div class="flex justify-between items-center mt-4">
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm font-medium text-shecan-text">Your Referral Code:</span>
+                            <span id="referral-code" class="text-shecan-dark-purple font-bold tracking-widest">N/A</span>
+                        </div>
+                        <div class="flex gap-2">
+                            <button id="intern-link-copy" class="p-2 bg-shecan-purple text-white rounded-full hover:bg-shecan-dark-purple transition-colors" title="Copy Donation Link">
+                                <svg class="lucide" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                            </button>
+                            <button id="intern-link-share" class="p-2 bg-green-500 text-white rounded-full hover:bg-green-600 transition-colors" title="Share on WhatsApp">
+                                <svg class="lucide" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" x2="12" y1="2" y2="15"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="bg-white p-6 rounded-3xl shadow-xl">
+                    <h3 class="text-xl font-bold text-shecan-purple mb-4">Badges</h3>
+                    <div id="badges-container" class="flex flex-wrap gap-4">
+                        <!-- Badges will be injected here by JavaScript -->
+                    </div>
+                </div>
+                <div class="bg-white p-6 rounded-3xl shadow-xl">
+                    <h3 class="text-xl font-bold text-shecan-purple mb-4">Transaction History</h3>
+                    <div class="overflow-x-auto rounded-xl">
+                        <table class="min-w-full bg-shecan-gray rounded-xl">
+                            <thead>
+                                <tr class="bg-shecan-purple text-white text-left text-sm font-semibold">
+                                    <th class="p-3 rounded-tl-xl">Donor Name</th>
+                                    <th class="p-3">Amount</th>
+                                    <th class="p-3 rounded-tr-xl">Date</th>
+                                </tr>
+                            </thead>
+                            <tbody id="transactions-table-body">
+                                <!-- Transactions will be injected here by JavaScript -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="md:w-1/3 flex flex-col gap-8">
+                <div class="bg-white p-6 rounded-3xl shadow-xl">
+                    <h3 class="text-xl font-bold text-shecan-purple mb-4">Notifications</h3>
+                    <ul class="space-y-4">
+                        <li class="flex items-start gap-3"><svg class="lucide text-shecan-pink shrink-0 mt-1" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><div><p class="text-shecan-text">You received a new donation of ₹100!</p><span class="text-xs text-gray-500">N/A</span></div></li>
+                        <li class="flex items-start gap-3"><svg class="lucide text-shecan-pink shrink-0 mt-1" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><div><p class="text-shecan-text">You unlocked the ₹500 badge!</p><span class="text-xs text-gray-500">N/A</span></div></li>
+                    </ul>
+                </div>
+                <div class="bg-white p-6 rounded-3xl shadow-xl">
+                    <h3 class="text-xl font-bold text-shecan-purple mb-4">Leaderboard</h3>
+                    <div class="flex justify-around mb-4">
+                        <button class="text-shecan-purple font-bold">All-Time</button>
+                        <button class="text-shecan-text hover:text-shecan-purple">Daily</button>
+                        <button class="text-shecan-text hover:text-shecan-purple">Weekly</button>
+                    </div>
+                    <ol id="leaderboard-list" class="list-decimal list-inside space-y-2">
+                        <!-- Leaderboard will be injected here by JavaScript -->
+                    </ol>
+                </div>
+            </div>
+        </section>
+
+        <!-- 4. Public Donation Page -->
+        <section id="donation-page" class="hidden flex-grow flex items-center justify-center p-4">
+            <div class="w-full max-w-md bg-white p-8 rounded-3xl shadow-xl animate-fade-in">
+                <div id="donation-form-container">
+                    <h2 class="text-3xl font-bold text-center text-shecan-dark-purple mb-2">Make a Donation</h2>
+                    <p class="text-center text-shecan-text mb-6">You are supporting <span id="donation-intern-name" class="font-bold text-shecan-pink">an intern</span>!</p>
+                    <form id="donation-form">
+                        <div class="mb-4"><label class="block text-shecan-text font-medium mb-1">Your Name (Optional)</label><input type="text" id="donor-name" class="w-full p-3 rounded-xl border border-shecan-light-pink focus:ring-2 focus:ring-shecan-pink" placeholder="Your Name"></div>
+                        <div class="mb-6"><label class="block text-shecan-text font-medium mb-1">Donation Amount</label><input type="number" id="donation-amount" value="100" min="1" class="w-full p-3 rounded-xl border border-shecan-light-pink focus:ring-2 focus:ring-shecan-pink"></div>
+                        <button type="submit" class="w-full p-3 bg-shecan-pink text-white font-bold rounded-xl shadow-lg hover:bg-shecan-purple transition-all duration-300 transform hover:scale-105">Donate ₹100</button>
+                    </form>
+                </div>
+                <div id="donation-thank-you" class="hidden text-center">
+                    <h2 class="text-3xl font-bold text-shecan-dark-purple mb-4">Thank You!</h2>
+                    <p class="text-lg text-shecan-text mb-6">Your generous donation has been successfully processed. You have helped empower a woman today.</p>
+                    <button id="donation-back-home" class="p-3 bg-shecan-purple text-white rounded-xl shadow-lg hover:bg-shecan-dark-purple">Back to Home</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 5. Admin Dashboard Section -->
+        <section id="admin-dashboard" class="hidden p-4 md:p-8">
+            <h2 class="text-3xl font-bold text-shecan-dark-purple mb-6">Admin Dashboard</h2>
+            <p>Admin functionality is ready to be implemented here. For this prototype, this is a placeholder view.</p>
+        </section>
+
+        <!-- 6. Super Admin Dashboard Section -->
+        <section id="super-admin-dashboard" class="hidden p-4 md:p-8">
+            <h2 class="text-3xl font-bold text-shecan-dark-purple mb-6">Super Admin Dashboard</h2>
+            <p>Super Admin functionality is ready to be implemented here. For this prototype, this is a placeholder view.</p>
+        </section>
+    </main>
+</body>
+</html>
